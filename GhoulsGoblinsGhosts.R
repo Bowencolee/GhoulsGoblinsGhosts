@@ -5,6 +5,9 @@
 library(tidymodels)
 library(vroom)
 library(nnet) # neural networks
+library(bonsai) # tree/forest work
+library(lightgbm) # Boosting
+library(dbarts) # BART
 
 
 ### DATA ###
@@ -74,7 +77,7 @@ nn_wf <- workflow() %>%
   add_recipe(my_recipe) %>%
   add_model(nn_model)
 
-tuning_grid <- grid_regular(hidden_units(range=c(1, 200)),
+tuning_grid <- grid_regular(hidden_units(range=c(1,10)),
                             levels=5)
 
 folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
@@ -102,3 +105,76 @@ vroom_write(x=nn_preds, file="./ggg_NN.csv", delim=",")
 CV_results %>% collect_metrics() %>%
   filter(.metric=="accuracy") %>%
   ggplot(aes(x=hidden_units, y=mean)) + geom_line()  
+
+##### BART & Boosting #####
+
+## Boost
+boost_model <- boost_tree(tree_depth=tune(),
+                          trees=tune(),
+                          learn_rate=tune()) %>%
+set_engine("lightgbm") %>% #or "xgboost" but lightgbm is faster
+  set_mode("classification")
+
+boost_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(boost_model)
+
+tuning_grid <- grid_regular(tree_depth(),
+                            trees(),
+                            learn_rate(),
+                            levels=5)
+
+folds <- vfold_cv(ggg_train, v = 5, repeats = 1)
+
+CV_results <- boost_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(accuracy)) #f_meas,sens, recall,spec, precision, accuracy
+
+bestTune <- CV_results %>%
+  select_best("accuracy")
+
+final_wf <- boost_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=ggg_train)
+
+boost_preds <- predict(final_wf, new_data=ggg_test,type="class") %>%
+  bind_cols(., ggg_test) %>%
+  select(id,.pred_class) %>%
+  rename(type=.pred_class)
+
+vroom_write(x=boost_preds, file="./ggg_boost.csv", delim=",")
+
+
+# BART
+
+bart_model <- parsnip::bart(trees=tune()) %>% # BART figures out depth and learn_rate
+  set_engine("dbarts") %>% # might need to install
+  set_mode("classification")
+
+bart_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(bart_model)
+
+tuning_grid <- grid_regular(trees(), levels=3)
+
+folds <- vfold_cv(ggg_train, v = 3, repeats = 1)
+
+CV_results <- bart_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(accuracy)) #f_meas,sens, recall,spec, precision, accuracy
+
+bestTune <- CV_results %>%
+  select_best("accuracy")
+
+final_wf <- bart_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=ggg_train)
+
+bart_preds <- predict(final_wf, new_data=ggg_test,type="class") %>%
+  bind_cols(., ggg_test) %>%
+  select(id,.pred_class) %>%
+  rename(type=.pred_class)
+
+vroom_write(x=bart_preds, file="./ggg_bart.csv", delim=",")
