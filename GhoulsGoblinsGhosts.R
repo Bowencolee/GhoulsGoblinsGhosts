@@ -4,10 +4,12 @@
 
 library(tidymodels)
 library(vroom)
+library(embed) # target encoding
 library(nnet) # neural networks
 library(bonsai) # tree/forest work
 library(lightgbm) # Boosting
 library(dbarts) # BART
+library(discrim) # naive bayes
 
 
 ### DATA ###
@@ -22,9 +24,9 @@ ggg_test <- vroom::vroom("test.csv") %>%
 ##### Recipe making #####
 
 my_recipe <- recipe(type~., data=ggg_train) %>%
-  update_role(id, new_role="id") %>%
-  step_dummy(color) %>% ## Turn color to factor then dummy encode color
-  step_range(all_numeric_predictors(), min=0, max=1) #scale to [0,1]
+  # update_role(id, new_role="id") %>%## Turn color to factor then dummy encode color
+  #step_range(all_numeric_predictors(), min=0, max=1) #scale to [0,1]
+  step_lencode_glm(color,outcome = vars(type))
 
 
 
@@ -178,3 +180,38 @@ bart_preds <- predict(final_wf, new_data=ggg_test,type="class") %>%
   rename(type=.pred_class)
 
 vroom_write(x=bart_preds, file="./ggg_bart.csv", delim=",")
+
+##### Naive Bayes #####
+ 
+nb_model <- naive_Bayes(Laplace=tune(), smoothness=tune()) %>%
+            set_mode("classification") %>%
+            set_engine("naivebayes")
+ 
+nb_wf <- workflow() %>%
+          add_recipe(my_recipe) %>%
+          add_model(nb_model)
+ 
+tuning_grid <- grid_regular(Laplace(),
+                             smoothness(),
+                             levels = 3)
+ 
+folds <- vfold_cv(ggg_train, v = 3, repeats = 1)
+ 
+CV_results <- nb_wf %>%
+   tune_grid(resamples=folds,
+             grid=tuning_grid,
+             metrics=metric_set(roc_auc)) #f_meas,sens, recall,spec, precision, accuracy
+ 
+bestTune <- CV_results %>%
+   select_best("roc_auc")
+ 
+final_wf <- nb_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=ggg_train)
+ 
+nb_preds <- predict(final_wf, new_data=ggg_test,type="class") %>%
+  bind_cols(., ggg_test) %>%
+  select(id,.pred_class) %>%
+  rename(type=.pred_class)
+
+vroom_write(x=nb_preds, file="./ggg_nb.csv", delim=",")
